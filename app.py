@@ -30,12 +30,9 @@ if not DB_URL:
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
-DB_CONNECT_TIMEOUT = _get_env_int("DB_CONNECT_TIMEOUT", 5)  # seconds
-DB_SSLMODE = os.environ.get("DB_SSLMODE", "require").strip()  # "require" is safe for Render external URLs
+DB_CONNECT_TIMEOUT = _get_env_int("DB_CONNECT_TIMEOUT", 5)
+DB_SSLMODE = os.environ.get("DB_SSLMODE", "require").strip()  # good default for Render external DB URLs
 
-
-# ----------------- DATABASE -----------------
-# psycopg2 connect args support connect_timeout + sslmode
 connect_args = {"connect_timeout": DB_CONNECT_TIMEOUT}
 if DB_SSLMODE:
     connect_args["sslmode"] = DB_SSLMODE
@@ -51,7 +48,7 @@ Base = declarative_base()
 
 
 # ----------------- FASTAPI APP -----------------
-app = FastAPI(title="DeniTask Macro Hub", version="1.0")
+app = FastAPI(title="DeniTask Macro Hub", version="1.1")
 
 
 class User(Base):
@@ -85,14 +82,9 @@ Index("ix_macros_creator_visibility", MacroRow.creator, MacroRow.visibility)
 
 @app.on_event("startup")
 def _startup():
-    """
-    Create tables at startup.
-    If DB is unreachable, fail fast instead of hanging.
-    """
     try:
         Base.metadata.create_all(bind=engine)
     except Exception as e:
-        # Raising here will make Render show a clear runtime error instead of hanging forever
         raise RuntimeError(f"Database init failed: {e}") from e
 
 
@@ -140,9 +132,13 @@ def _require_user(token: Optional[str]) -> User:
 
 
 # ----------------- ROUTES -----------------
+@app.get("/")
+def home():
+    return {"service": "denitask-macro-hub", "hint": "Use /health or /docs"}
+
+
 @app.get("/health")
 def health():
-    # keep /health lightweight (no DB query). If you want DB check, tell me.
     return {"ok": True, "service": "denitask-macro-hub"}
 
 
@@ -273,3 +269,24 @@ def upload_macro(
             instructions=r.instructions,
             updated_utc=r.updated_utc,
         )
+
+
+# -------- NEW: delete macro (only creator) --------
+@app.delete("/macros/{macro_id}")
+def delete_macro(
+    macro_id: int,
+    x_denitask_token: Optional[str] = Header(default=None, alias="X-DeniTask-Token"),
+):
+    user = _require_user(x_denitask_token)
+
+    with SessionLocal() as db:
+        r = db.execute(select(MacroRow).where(MacroRow.id == int(macro_id))).scalar_one_or_none()
+        if not r:
+            raise HTTPException(status_code=404, detail="Macro not found")
+
+        if r.creator != user.username:
+            raise HTTPException(status_code=403, detail="Not allowed")
+
+        db.delete(r)
+        db.commit()
+        return {"ok": True, "deleted_id": int(macro_id)}
