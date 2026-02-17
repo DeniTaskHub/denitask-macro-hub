@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: denitask-macro-hub
+    env: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
