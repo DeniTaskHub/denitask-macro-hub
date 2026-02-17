@@ -13,8 +13,16 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-# ----------------- DATABASE -----------------
-DB_URL = os.environ.get("DATABASE_URL")
+
+# ----------------- CONFIG -----------------
+def _get_env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except Exception:
+        return default
+
+
+DB_URL = os.environ.get("DATABASE_URL", "").strip()
 if not DB_URL:
     raise RuntimeError("DATABASE_URL env var is required")
 
@@ -22,9 +30,25 @@ if not DB_URL:
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(DB_URL, pool_pre_ping=True)
+DB_CONNECT_TIMEOUT = _get_env_int("DB_CONNECT_TIMEOUT", 5)  # seconds
+DB_SSLMODE = os.environ.get("DB_SSLMODE", "require").strip()  # "require" is safe for Render external URLs
+
+
+# ----------------- DATABASE -----------------
+# psycopg2 connect args support connect_timeout + sslmode
+connect_args = {"connect_timeout": DB_CONNECT_TIMEOUT}
+if DB_SSLMODE:
+    connect_args["sslmode"] = DB_SSLMODE
+
+engine = create_engine(
+    DB_URL,
+    pool_pre_ping=True,
+    connect_args=connect_args,
+)
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
+
 
 # ----------------- FASTAPI APP -----------------
 app = FastAPI(title="DeniTask Macro Hub", version="1.0")
@@ -61,7 +85,15 @@ Index("ix_macros_creator_visibility", MacroRow.creator, MacroRow.visibility)
 
 @app.on_event("startup")
 def _startup():
-    Base.metadata.create_all(bind=engine)
+    """
+    Create tables at startup.
+    If DB is unreachable, fail fast instead of hanging.
+    """
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        # Raising here will make Render show a clear runtime error instead of hanging forever
+        raise RuntimeError(f"Database init failed: {e}") from e
 
 
 # ----------------- API MODELS -----------------
@@ -110,6 +142,7 @@ def _require_user(token: Optional[str]) -> User:
 # ----------------- ROUTES -----------------
 @app.get("/health")
 def health():
+    # keep /health lightweight (no DB query). If you want DB check, tell me.
     return {"ok": True, "service": "denitask-macro-hub"}
 
 
@@ -205,6 +238,7 @@ def upload_macro(
     x_denitask_token: Optional[str] = Header(default=None, alias="X-DeniTask-Token"),
 ):
     user = _require_user(x_denitask_token)
+
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Macro name required")
